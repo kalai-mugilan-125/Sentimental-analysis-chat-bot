@@ -14,35 +14,50 @@ from sklearn.preprocessing import LabelEncoder
 from sklearn.model_selection import train_test_split
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
-from sklearn.metrics import accuracy_Score()
+from sklearn.metrics import accuracy_score
 
 app = Flask(__name__)
 nltk.download('vader_lexicon')
 sia = SentimentIntensityAnalyzer()
 nlp = spacy.load("en_core_web_sm")
 
+from dotenv import load_dotenv
+from huggingface_hub import InferenceClient
+
+load_dotenv()
+hf_token = os.getenv("HUGGINGFACE_API_TOKEN")
+# Using Qwen/Qwen2.5-7B-Instruct as the default chat model
+hf_client = InferenceClient("Qwen/Qwen2.5-7B-Instruct", token=hf_token) if hf_token else None
+
+
 # Load and process dataset
 try:
-    df = pd.read_csv("C:/Users/Learner/Downloads/mydataset.csv", sep=";", names=["Description", "Emotion"])
-    df['preprocessed_text'] = df['Description'].apply(
-        lambda x: " ".join([token.lemma_ for token in nlp(x) if not token.is_stop and not token.is_punct])
-    )
-    label_encoder = LabelEncoder()
-    df['Emotion_label'] = label_encoder.fit_transform(df['Emotion'])
-    pipeline = Pipeline([
-        ('tfidf', TfidfVectorizer()),
-        ('clf', RandomForestClassifier())
-    ])
-    X_train, X_test, y_train, y_test = train_test_split(
-        df['preprocessed_text'], 
-        df['Emotion_label'], 
-        test_size=0.25, 
-        random_state=42, 
-        stratify=df['Emotion_label']
-    )
+    # Changed from hardcoded 'C:/Users/Learner/Downloads/mydataset.csv' to local 'mydataset.csv'
+    dataset_path = "mydataset.csv"
     
-    image_path = os.path.join('static', 'images', 'confusion_matrix.png')
-    pipeline.fit(X_train, y_train)
+    if not os.path.exists(dataset_path):
+        print(f"Warning: Dataset not found at {dataset_path}. Please make sure 'mydataset.csv' is in your project folder.")
+    else:
+        df = pd.read_csv(dataset_path, sep=";", names=["Description", "Emotion"])
+        df['preprocessed_text'] = df['Description'].apply(
+            lambda x: " ".join([token.lemma_ for token in nlp(x) if not token.is_stop and not token.is_punct])
+        )
+        label_encoder = LabelEncoder()
+        df['Emotion_label'] = label_encoder.fit_transform(df['Emotion'])
+        pipeline = Pipeline([
+            ('tfidf', TfidfVectorizer()),
+            ('clf', RandomForestClassifier())
+        ])
+        X_train, X_test, y_train, y_test = train_test_split(
+            df['preprocessed_text'], 
+            df['Emotion_label'], 
+            test_size=0.25, 
+            random_state=42, 
+            stratify=df['Emotion_label']
+        )
+        
+        image_path = os.path.join('static', 'images', 'confusion_matrix.png')
+        pipeline.fit(X_train, y_train)
     y_pred = pipeline.predict(X_test)
     cm = confusion_matrix(y_test, y_pred)
     cm_display = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=label_encoder.classes_)
@@ -55,21 +70,26 @@ try:
 except Exception as e:
     print(f"Error loading dataset or training model: {e}")
 
-# Function to get a random response based on emotion
-def get_response(emotion):
+# Function to get a generated response based on emotion using an LLM
+def get_response(emotion, user_message):
+    if not hf_client:
+        return "Error: Hugging Face API token not found in .env file."
+    
+    messages = [
+        {"role": "system", "content": "You are an empathetic conversational chatbot."},
+        {"role": "user", "content": f"The user said: '{user_message}'. A simple sentiment analyzer guessed the emotion is '{emotion}', but it might be wrong. Rely on your own understanding of the user's message to respond appropriately. Reply to the user empathetically in 1 to 2 sentences, matching their true emotional context."}
+    ]
+    
     try:
-        with open(r'D:/code tools/CCP-3rd-sem/responses.json', 'r') as file:
-            responses = json.load(file)
-        if emotion in responses:
-            return random.choice(responses[emotion])  # Randomly pick a response for the given emotion
-        else:
-            return "I am not sure how to respond to that."
-    except FileNotFoundError:
-        return "Response file not found."
-    except json.JSONDecodeError:
-        return "Error decoding the response file."
+        response = hf_client.chat_completion(
+            messages=messages,
+            max_tokens=100,
+            temperature=0.7,
+            top_p=0.95
+        )
+        return response.choices[0].message.content.strip()
     except Exception as e:
-        return f"Error: {str(e)}"
+        return f"Error communicating with LLM: {str(e)}"
 
 # Function to classify emotion based on sentiment score
 def classify_emotion(text):
@@ -107,7 +127,7 @@ def get_bot_response():
     user_message = request.form['msg']
     emotion = classify_emotion(user_message)
     print(f"User Message: {user_message}, Classified Emotion: {emotion}")  # Log for debugging
-    bot_response = get_response(emotion)
+    bot_response = get_response(emotion, user_message)
     return jsonify({'response': bot_response})
 
 if __name__ == "__main__":
